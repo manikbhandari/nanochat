@@ -9,7 +9,7 @@ import logging
 import torch
 
 from nanochat.common import get_base_dir
-from nanochat.gpt import GPT, GPTConfig
+from nanochat.gpt_simple import GPT, GPTConfig
 from nanochat.tokenizer import get_tokenizer
 from nanochat.common import setup_default_logging
 
@@ -20,24 +20,24 @@ def log0(message):
     if int(os.environ.get('RANK', 0)) == 0:
         logger.info(message)
 
-def _patch_missing_config_keys(model_config_kwargs):
-    """Add default values for new config keys missing in old checkpoints."""
-    # Old models were trained with full context (no sliding window)
-    if "window_pattern" not in model_config_kwargs:
-        model_config_kwargs["window_pattern"] = "L"
-        log0(f"Patching missing window_pattern in model config to 'L'")
+# def _patch_missing_config_keys(model_config_kwargs):
+#     """Add default values for new config keys missing in old checkpoints."""
+#     # Old models were trained with full context (no sliding window)
+#     if "window_pattern" not in model_config_kwargs:
+#         model_config_kwargs["window_pattern"] = "L"
+#         log0(f"Patching missing window_pattern in model config to 'L'")
 
-def _patch_missing_keys(model_data, model_config):
-    """Add default values for new parameters that may be missing in old checkpoints."""
-    n_layer = model_config.n_layer
-    # resid_lambdas defaults to 1.0 (identity scaling)
-    if "resid_lambdas" not in model_data:
-        model_data["resid_lambdas"] = torch.ones(n_layer)
-        log0(f"Patching missing resid_lambdas in model data to 1.0")
-    # x0_lambdas defaults to 0.0 (disabled)
-    if "x0_lambdas" not in model_data:
-        model_data["x0_lambdas"] = torch.zeros(n_layer)
-        log0(f"Patching missing x0_lambdas in model data to 0.0")
+# def _patch_missing_keys(model_data, model_config):
+#     """Add default values for new parameters that may be missing in old checkpoints."""
+#     n_layer = model_config.n_layer
+#     # resid_lambdas defaults to 1.0 (identity scaling)
+#     if "resid_lambdas" not in model_data:
+#         model_data["resid_lambdas"] = torch.ones(n_layer)
+#         log0(f"Patching missing resid_lambdas in model data to 1.0")
+#     # x0_lambdas defaults to 0.0 (disabled)
+#     if "x0_lambdas" not in model_data:
+#         model_data["x0_lambdas"] = torch.zeros(n_layer)
+#         log0(f"Patching missing x0_lambdas in model data to 0.0")
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
     if rank == 0:
@@ -84,6 +84,7 @@ def build_model(checkpoint_dir, step, device, phase):
     """
     assert phase in ["train", "eval"], f"Invalid phase: {phase}"
     model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, step, device, load_optimizer=False)
+    print(meta_data)
     if device.type in {"cpu", "mps"}:
         # Convert bfloat16 tensors to float for CPU inference
         model_data = {
@@ -93,10 +94,10 @@ def build_model(checkpoint_dir, step, device, phase):
     # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
     model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
     model_config_kwargs = meta_data["model_config"]
-    _patch_missing_config_keys(model_config_kwargs)
+    # _patch_missing_config_keys(model_config_kwargs)
     log0(f"Building model with config: {model_config_kwargs}")
     model_config = GPTConfig(**model_config_kwargs)
-    _patch_missing_keys(model_data, model_config)
+    # _patch_missing_keys(model_data, model_config)
     with torch.device("meta"):
         model = GPT(model_config)
     # Load the model state
