@@ -8,6 +8,14 @@ export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
 
+
+# -----------------------------------------------------------------------------
+# Update for torch.compile
+# Some older machines lack a Python.h file
+apt-get update
+apt-get install -y python3.10-dev build-essential
+# -----------------------------------------------------------------------------
+
 # -----------------------------------------------------------------------------
 # Python venv setup with uv
 
