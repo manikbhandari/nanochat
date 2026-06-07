@@ -23,7 +23,7 @@ parser.add_argument("--debug", action="store_true", help="Add debugging logging.
 parser.add_argument("--no-wandb", action="store_true", help="Don't log to wandb.")
 # Batch size
 parser.add_argument("--device-batch-size", type=int, default=8,  help="The batch size seen by each GPU.")
-parser.add_argument("--examples-per-step", type=int, default=2, help="The total number of examples seen in 1 step across all GPUs.")
+parser.add_argument("--examples-per-step", type=int, default=16, help="The total number of examples seen in 1 step across all GPUs.")
 parser.add_argument("--num-samples",       type=int, default=16, help="The total number of samples per prompt in a group.")
 # Resume checkpoint details
 parser.add_argument("--source",      type=str, default="sft", help="base/sft/rl. Stage of training.")
@@ -168,7 +168,8 @@ if __name__ == "__main__":
             wandb_run.log({
                 "step": step,
                 "reward": rewards_step_mean,
-                "generation_length": generation_lengths_mean
+                "sequence_length": generation_lengths_mean,
+                "lrm": get_lrm(step, total_steps)
             })
         
         for opt in optimizers:
@@ -176,5 +177,5 @@ if __name__ == "__main__":
                 group["lr"] = group["initial_lr"] * get_lrm(step, total_steps)
             opt.step()
         model.zero_grad(set_to_none=True)
-        # logging info
+    wandb_run.finish()
     
