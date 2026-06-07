@@ -2,15 +2,18 @@
 # export WANDB_API_KEY=blah blah
 # wandb init
 # python -m scripts.chat_rl
+# torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl
 
 # assume 1 gpu
 
 import argparse
 import functools
 import itertools
+import os
 import pdb
 import random
 import torch
+import torch.distributed as dist
 import wandb
 
 from nanochat.checkpoint_manager import load_model
@@ -43,15 +46,19 @@ args = parser.parse_args()
 assert args.num_samples % args.device_batch_size == 0  # TODO: relax this assumption for num_samples < batch_size
 dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
 autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=dtype)
-wandb_run = None if args.no_wandb else wandb.init(project="nanochat-rl", name="d32_gsm8k_redo_1gpu", config=vars(args).copy())
+wandb_run = None if (args.no_wandb or int(os.environ.get("RANK", 0)) != 0) else wandb.init(project="nanochat-rl", name="d32_gsm8k_redo_8gpu", config=vars(args).copy())
+
+def print0(s):
+    if int(os.environ.get("RANK", 0)) == 0:
+        print(s)
 
 def printd(s):
     if args.debug:
-        print(s)
+        print0(s)
 
 @torch.no_grad()
-def get_rollout_group(model, task, engine, tokenizer, args, step):
-    example_idxs_this_rank = list(range(len(task)))  # assume 1 gpu
+def get_rollout_group(model, task, engine, tokenizer, args, ddp_world_size, step):
+    example_idxs_this_rank = list(range(0, len(task), ddp_world_size))  # assume 1 gpu
     random.shuffle(example_idxs_this_rank)
     for idx in itertools.cycle(example_idxs_this_rank):
         model.eval()
@@ -115,7 +122,15 @@ def get_rollout_group(model, task, engine, tokenizer, args, step):
 if __name__ == "__main__":
     gsm8k = GSM8K(subset="main", split="train")
 
-    device = torch.device(args.device_type) # TODO: add rank info for ddp
+    ddp_rank, ddp_local_rank, ddp_world_size = int(os.environ.get("RANK", 0)), int(os.environ.get("LOCAL_RANK", 0)), int(os.environ.get("WORLD_SIZE", 0))
+    if ddp_world_size > 1 and args.device_type == "cuda":
+        device = torch.device("cuda", ddp_local_rank)
+        torch.cuda.set_device(device)  # make "cuda" default to this device
+        dist.init_process_group(backend="nccl", device_id=device)
+        dist.barrier()
+    else:
+        device = torch.device(args.device_type)  # "cpu|cuda"
+
     model, tokenizer, meta_data = load_model(source=args.source, phase="eval", step=args.step, device=device)
     engine = Engine(model, tokenizer)
     total_steps = (len(gsm8k) // args.examples_per_step) * args.epochs
@@ -128,8 +143,8 @@ if __name__ == "__main__":
     def get_lrm(it, total_steps):
         return 1.0 - it / total_steps  # ramp down to 0
     
-    n_examples_per_rank = args.examples_per_step // 1  # hard coded num gpus = 1
-    dataset_iterator = functools.partial(get_rollout_group, model, gsm8k, engine, tokenizer, args)
+    n_examples_per_rank = args.examples_per_step // ddp_world_size
+    dataset_iterator = functools.partial(get_rollout_group, model, gsm8k, engine, tokenizer, args, ddp_world_size)
     for step in range(total_steps):
         rewards_step = []
         lengths_step = []
@@ -157,14 +172,15 @@ if __name__ == "__main__":
                 pg_loss = -pg_loss  # maximize pi(trajectory) * adv(trajectory) => minimize loss
                 pg_loss.backward()
                 # no need to log advantages as their sum is always 0
-                print(f"Step: {step}/{total_steps} example: {example_idx}/{n_examples_per_rank} loss: {pg_loss.item():.4f} rewards mean: {rewards_group.mean().item():.4f}")
+                print0(f"Step: {step}/{total_steps} example: {example_idx}/{n_examples_per_rank} loss: {pg_loss.item():.4f} rewards mean: {rewards_group.mean().item():.4f}")
                 rewards_step.append(rewards_group.mean().item())
                 lengths_step.extend(len(seq) for seq in generations_group)
         
+        # TODO: do this logging after reducing the rewards and gen lengths across ranks
         rewards_step_mean = sum(rewards_step) / len(rewards_step)
         generation_lengths_mean = sum(lengths_step) / len(lengths_step)
-        print(f"Step: {step}/{total_steps} Avg rewards: {rewards_step_mean} Avg gen len: {generation_lengths_mean}")
-        if not args.no_wandb:
+        print0(f"Step: {step}/{total_steps} Avg rewards: {rewards_step_mean} Avg gen len: {generation_lengths_mean}")
+        if not args.no_wandb and ddp_rank == 0:
             wandb_run.log({
                 "step": step,
                 "reward": rewards_step_mean,
